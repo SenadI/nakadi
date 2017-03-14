@@ -14,9 +14,9 @@ import org.zalando.nakadi.domain.PartitionStatistics;
 import org.zalando.nakadi.domain.Subscription;
 import org.zalando.nakadi.domain.SubscriptionBase;
 import org.zalando.nakadi.domain.Timeline;
+import org.zalando.nakadi.domain.TopicPartition;
 import org.zalando.nakadi.repository.TopicRepository;
 import org.zalando.nakadi.service.CursorConverter;
-import org.zalando.nakadi.service.subscription.model.Partition;
 import org.zalando.nakadi.service.timeline.TimelineService;
 import org.zalando.nakadi.view.SubscriptionCursorWithoutToken;
 import static org.mockito.Matchers.eq;
@@ -85,10 +85,10 @@ public class KafkaClientTest {
         when(timelineService.getTopicRepository(eq(timelineEt00))).thenReturn(firstTR);
         when(timelineService.getTopicRepository(eq(timelineEt10))).thenReturn(secondTR);
 
-        final Map<Partition.PartitionKey, NakadiCursor> cursorMap = client.getSubscriptionOffsets();
+        final Map<TopicPartition, NakadiCursor> cursorMap = client.getSubscriptionOffsets();
         Assert.assertEquals(cursorMap.size(), 2);
-        Assert.assertEquals(beforeBegin0, cursorMap.get(new Partition.PartitionKey(ET_0, "0")));
-        Assert.assertEquals(beforeBegin1, cursorMap.get(new Partition.PartitionKey(ET_1, "0")));
+        Assert.assertEquals(beforeBegin0, cursorMap.get(new TopicPartition(ET_0, "0")));
+        Assert.assertEquals(beforeBegin1, cursorMap.get(new TopicPartition(ET_1, "0")));
     }
 
     @Test
@@ -115,10 +115,10 @@ public class KafkaClientTest {
         when(timelineService.getTopicRepository(eq(timelineEt01))).thenReturn(firstTR);
         when(timelineService.getTopicRepository(eq(timelineEt11))).thenReturn(secondTR);
 
-        final Map<Partition.PartitionKey, NakadiCursor> cursorMap = client.getSubscriptionOffsets();
+        final Map<TopicPartition, NakadiCursor> cursorMap = client.getSubscriptionOffsets();
         Assert.assertEquals(cursorMap.size(), 2);
-        Assert.assertEquals(end0, cursorMap.get(new Partition.PartitionKey(ET_0, "0")));
-        Assert.assertEquals(end1, cursorMap.get(new Partition.PartitionKey(ET_1, "0")));
+        Assert.assertEquals(end0, cursorMap.get(new TopicPartition(ET_0, "0")));
+        Assert.assertEquals(end1, cursorMap.get(new TopicPartition(ET_1, "0")));
     }
 
     @Test
@@ -138,10 +138,10 @@ public class KafkaClientTest {
 
         when(cursorConverter.convert(cursor1)).thenReturn(middle0);
         when(cursorConverter.convert(cursor2)).thenReturn(middle1);
-        final Map<Partition.PartitionKey, NakadiCursor> cursorMap = client.getSubscriptionOffsets();
+        final Map<TopicPartition, NakadiCursor> cursorMap = client.getSubscriptionOffsets();
         Assert.assertEquals(cursorMap.size(), 2);
-        Assert.assertEquals(middle0, cursorMap.get(new Partition.PartitionKey(ET_0, "0")));
-        Assert.assertEquals(middle1, cursorMap.get(new Partition.PartitionKey(ET_1, "0")));
+        Assert.assertEquals(middle0, cursorMap.get(new TopicPartition(ET_0, "0")));
+        Assert.assertEquals(middle1, cursorMap.get(new TopicPartition(ET_1, "0")));
 
     }
 

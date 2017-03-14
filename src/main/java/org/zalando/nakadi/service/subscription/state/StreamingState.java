@@ -3,19 +3,10 @@ package org.zalando.nakadi.service.subscription.state;
 import com.codahale.metrics.Meter;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.base.Preconditions;
-import org.apache.kafka.clients.consumer.Consumer;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.common.TopicPartition;
-import org.slf4j.LoggerFactory;
-import org.zalando.nakadi.metrics.MetricUtils;
-import org.zalando.nakadi.service.EventStream;
-import org.zalando.nakadi.service.subscription.model.Partition;
-import org.zalando.nakadi.service.subscription.zk.ZKSubscription;
-import org.zalando.nakadi.view.SubscriptionCursor;
-import org.zalando.nakadi.domain.Timeline;
-
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -23,21 +14,36 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
-import java.util.SortedMap;
-import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import org.slf4j.LoggerFactory;
+import org.zalando.nakadi.domain.ConsumedEvent;
+import org.zalando.nakadi.domain.NakadiCursor;
+import org.zalando.nakadi.domain.PartitionStatistics;
+import org.zalando.nakadi.domain.Timeline;
+import org.zalando.nakadi.domain.TopicPartition;
+import org.zalando.nakadi.exceptions.InternalNakadiException;
+import org.zalando.nakadi.exceptions.InvalidCursorException;
+import org.zalando.nakadi.exceptions.NakadiException;
+import org.zalando.nakadi.exceptions.NakadiRuntimeException;
+import org.zalando.nakadi.exceptions.NoSuchEventTypeException;
+import org.zalando.nakadi.metrics.MetricUtils;
+import org.zalando.nakadi.repository.EventConsumer;
+import org.zalando.nakadi.service.EventStream;
+import org.zalando.nakadi.service.subscription.model.Partition;
+import org.zalando.nakadi.service.subscription.zk.ZKSubscription;
+import org.zalando.nakadi.view.SubscriptionCursor;
 
 
 class StreamingState extends State {
-    private final Map<Partition.PartitionKey, PartitionData> offsets = new HashMap<>();
+    private final Map<TopicPartition, PartitionData> offsets = new HashMap<>();
     // Maps partition barrier when releasing must be completed or stream will be closed.
     // The reasons for that if there are two partitions (p0, p1) and p0 is reassigned, if p1 is working
     // correctly, and p0 is not receiving any updates - reassignment won't complete.
-    private final Map<Partition.PartitionKey, Long> releasingPartitions = new HashMap<>();
+    private final Map<TopicPartition, Long> releasingPartitions = new HashMap<>();
     private ZKSubscription topologyChangeSubscription;
-    private Consumer<String, String> kafkaConsumer;
+    private EventConsumer.ReassignableEventConsumer eventConsumer;
     private boolean pollPaused;
     private long lastCommitMillis;
     private long committedEvents;
@@ -45,17 +51,17 @@ class StreamingState extends State {
     private long batchesSent;
     private Meter bytesSentMeter;
     // Uncommitted offsets are calculated right on exiting from Streaming state.
-    private Map<Partition.PartitionKey, Long> uncommittedOffsets;
+    private Map<TopicPartition, NakadiCursor> uncommittedOffsets;
 
     @Override
     public void onEnter() {
         final String kafkaFlushedBytesMetricName = MetricUtils.metricNameForHiLAStream(
                 this.getContext().getParameters().getConsumingAppId(),
-                this.getContext().getSubscriptionId()
+                this.getContext().getSubscription().getId()
         );
         bytesSentMeter = this.getContext().getMetricRegistry().meter(kafkaFlushedBytesMetricName);
 
-        this.kafkaConsumer = getKafka().createKafkaConsumer();
+        this.eventConsumer = getContext().getTimelineService().createEventConsumer(null);
 
         // Subscribe for topology changes.
         this.topologyChangeSubscription = getZk().subscribeForTopologyChanges(() -> addTask(this::topologyChanged));
@@ -96,14 +102,14 @@ class StreamingState extends State {
 
     private void sendMetadata(final String metadata) {
         offsets.entrySet().stream().findFirst()
-                .ifPresent(pk -> flushData(pk.getKey(), new TreeMap<>(), Optional.of(metadata)));
+                .ifPresent(pk -> flushData(pk.getKey(), Collections.emptyList(), Optional.of(metadata)));
     }
 
     private long getLastCommitMillis() {
         return lastCommitMillis;
     }
 
-    private Map<Partition.PartitionKey, Long> getUncommittedOffsets() {
+    private Map<TopicPartition, NakadiCursor> getUncommittedOffsets() {
         Preconditions.checkNotNull(uncommittedOffsets, "uncommittedOffsets should not be null on time of call");
         return uncommittedOffsets;
     }
@@ -114,7 +120,7 @@ class StreamingState extends State {
     }
 
     private void pollDataFromKafka() {
-        if (kafkaConsumer == null) {
+        if (eventConsumer == null) {
             throw new IllegalStateException("kafkaConsumer should not be null when calling pollDataFromKafka method");
         }
 
@@ -130,26 +136,36 @@ class StreamingState extends State {
             return;
         }
 
-        if (kafkaConsumer.assignment().isEmpty() || pollPaused) {
+        if (eventConsumer.getAssignment().isEmpty() || pollPaused) {
             // Small optimization not to waste CPU while not yet assigned to any partitions
             scheduleTask(this::pollDataFromKafka, getKafkaPollTimeout(), TimeUnit.MILLISECONDS);
             return;
         }
-        final ConsumerRecords<String, String> records = kafkaConsumer.poll(getKafkaPollTimeout());
-        if (!records.isEmpty()) {
-            for (final TopicPartition tp : records.partitions()) {
-                final Partition.PartitionKey pk = new Partition.PartitionKey(tp.topic(),
-                        String.valueOf(tp.partition()));
-                Optional.ofNullable(offsets.get(pk))
-                        .ifPresent(pd -> records.records(tp)
-                                .forEach(record -> pd.addEventFromKafka(record.offset(), record.value())));
+        boolean added = false;
+        Optional<ConsumedEvent> event;
+        while ((event = eventConsumer.readEvent(false)).isPresent()) {
+            added = true;
+            rememberEvent(event.get());
+        }
+        if ((event = eventConsumer.readEvent(true)).isPresent()) {
+            added = true;
+            rememberEvent(event.get());
+            while ((event = eventConsumer.readEvent(false)).isPresent()) {
+                rememberEvent(event.get());
             }
+        }
+        if (added) {
             addTask(this::streamToOutput);
         }
+
         // Yep, no timeout. All waits are in kafka.
         // It works because only one pollDataFromKafka task is present in queue each time. Poll process will stop
         // when this state will be changed to any other state.
         addTask(this::pollDataFromKafka);
+    }
+
+    private void rememberEvent(final ConsumedEvent event) {
+        Optional.ofNullable(offsets.get(event.getPosition().getTopicPartition())).ifPresent(pd -> pd.addEvent(event));
     }
 
     private long getMessagesAllowedToSend() {
@@ -174,8 +190,8 @@ class StreamingState extends State {
     private void streamToOutput() {
         final long currentTimeMillis = System.currentTimeMillis();
         int freeSlots = (int) getMessagesAllowedToSend();
-        SortedMap<Long, String> toSend;
-        for (final Map.Entry<Partition.PartitionKey, PartitionData> e : offsets.entrySet()) {
+        for (final Map.Entry<TopicPartition, PartitionData> e : offsets.entrySet()) {
+            List<ConsumedEvent> toSend;
             while (null != (toSend = e.getValue().takeEventsToStream(
                     currentTimeMillis,
                     Math.min(getParameters().batchLimitEvents, freeSlots),
@@ -196,11 +212,11 @@ class StreamingState extends State {
         }
     }
 
-    private void flushData(final Partition.PartitionKey pk, final SortedMap<Long, String> data,
+    private void flushData(final TopicPartition pk, final List<ConsumedEvent> data,
                            final Optional<String> metadata) {
         try {
-            final long numberOffset = offsets.get(pk).getSentOffset();
-            final String batch = serializeBatch(pk, numberOffset, new ArrayList<>(data.values()), metadata);
+            final NakadiCursor sentOffset = offsets.get(pk).getSentOffset();
+            final String batch = serializeBatch(sentOffset, data, metadata);
 
             final byte[] batchBytes = batch.getBytes(EventStream.UTF8);
             getOut().streamData(batchBytes);
@@ -212,15 +228,13 @@ class StreamingState extends State {
         }
     }
 
-    private String serializeBatch(final Partition.PartitionKey partitionKey, final long offset,
-                                  final List<String> events, final Optional<String> metadata)
+    private String serializeBatch(final NakadiCursor lastSentCursor, final List<ConsumedEvent> events,
+                                  final Optional<String> metadata)
             throws JsonProcessingException {
 
-        final Timeline timeline = getContext().getTimelinesForTopics().get(partitionKey.getTopic());
-        final String token = getContext().getCursorTokenService().generateToken();
         final SubscriptionCursor cursor = getContext().getCursorConverter().convert(
-                partitionKey.createKafkaCursor(offset).toNakadiCursor(timeline),
-                token);
+                lastSentCursor,
+                getContext().getCursorTokenService().generateToken());
         final String cursorSerialized = getContext().getObjectMapper().writeValueAsString(cursor);
 
         final StringBuilder builder = new StringBuilder()
@@ -253,11 +267,13 @@ class StreamingState extends State {
                 new HashSet<>(offsets.keySet()).forEach(this::removeFromStreaming);
             }
         }
-        if (null != kafkaConsumer) {
+        if (null != eventConsumer) {
             try {
-                kafkaConsumer.close();
+                eventConsumer.close();
+            } catch (IOException e) {
+                throw new NakadiRuntimeException(e);
             } finally {
-                kafkaConsumer = null;
+                eventConsumer = null;
             }
         }
     }
@@ -279,11 +295,11 @@ class StreamingState extends State {
     }
 
     void refreshTopologyUnlocked(final Partition[] assignedPartitions) {
-        final Map<Partition.PartitionKey, Partition> newAssigned = Stream.of(assignedPartitions)
+        final Map<TopicPartition, Partition> newAssigned = Stream.of(assignedPartitions)
                 .filter(p -> p.getState() == Partition.State.ASSIGNED)
                 .collect(Collectors.toMap(Partition::getKey, p -> p));
 
-        final Map<Partition.PartitionKey, Partition> newReassigning = Stream.of(assignedPartitions)
+        final Map<TopicPartition, Partition> newReassigning = Stream.of(assignedPartitions)
                 .filter(p -> p.getState() == Partition.State.REASSIGNING)
                 .collect(Collectors.toMap(Partition::getKey, p -> p));
 
@@ -322,13 +338,13 @@ class StreamingState extends State {
             getLog().info("{}. Streaming partitions: [{}]. Reassigning partitions: [{}]",
                     reason,
                     offsets.keySet().stream().filter(p -> !releasingPartitions.containsKey(p))
-                            .map(Partition.PartitionKey::toString).collect(Collectors.joining(",")),
-                    releasingPartitions.keySet().stream().map(Partition.PartitionKey::toString)
+                            .map(TopicPartition::toString).collect(Collectors.joining(",")),
+                    releasingPartitions.keySet().stream().map(TopicPartition::toString)
                             .collect(Collectors.joining(", ")));
         }
     }
 
-    private void addPartitionToReassigned(final Partition.PartitionKey partitionKey) {
+    private void addPartitionToReassigned(final TopicPartition partitionKey) {
         final long currentTime = System.currentTimeMillis();
         final long barrier = currentTime + getParameters().commitTimeoutMillis;
         releasingPartitions.put(partitionKey, barrier);
@@ -336,7 +352,7 @@ class StreamingState extends State {
                 TimeUnit.MILLISECONDS);
     }
 
-    private void barrierOnRebalanceReached(final Partition.PartitionKey pk) {
+    private void barrierOnRebalanceReached(final TopicPartition pk) {
         if (!releasingPartitions.containsKey(pk)) {
             return;
         }
@@ -353,45 +369,95 @@ class StreamingState extends State {
     }
 
     private void reconfigureKafkaConsumer(final boolean forceSeek) {
-        if (kafkaConsumer == null) {
+        if (eventConsumer == null) {
             throw new IllegalStateException(
                     "kafkaConsumer should not be null when calling reconfigureKafkaConsumer method");
         }
-        final Set<Partition.PartitionKey> currentKafkaAssignment = kafkaConsumer.assignment().stream()
-                .map(tp -> new Partition.PartitionKey(tp.topic(), String.valueOf(tp.partition())))
+        final Set<TopicPartition> currentKafkaAssignment = eventConsumer.getAssignment().stream()
+                .map(tp -> new TopicPartition(tp.getTopic(), String.valueOf(tp.getPartition())))
                 .collect(Collectors.toSet());
 
-        final Set<Partition.PartitionKey> currentNakadiAssignment = offsets.keySet().stream()
+        final Set<TopicPartition> currentNakadiAssignment = offsets.keySet().stream()
                 .filter(o -> !this.releasingPartitions.containsKey(o))
                 .collect(Collectors.toSet());
         if (!currentKafkaAssignment.equals(currentNakadiAssignment) || forceSeek) {
-            final Map<Partition.PartitionKey, TopicPartition> kafkaKeys = currentNakadiAssignment.stream().collect(
-                    Collectors.toMap(
-                            k -> k,
-                            k -> new TopicPartition(k.getTopic(), Integer.valueOf(k.getPartition()))));
-            // Ignore order
-            kafkaConsumer.assign(new ArrayList<>(kafkaKeys.values()));
-            // Check if offsets are available in kafka
-            kafkaConsumer.seekToBeginning(kafkaKeys.values().toArray(new TopicPartition[kafkaKeys.size()]));
-            kafkaKeys.forEach((key, kafka) -> offsets.get(key).ensureDataAvailable(kafkaConsumer.position(kafka)));
-            //
-            kafkaKeys.forEach((k, v) -> kafkaConsumer.seek(v, offsets.get(k).getSentOffset() + 1));
-            offsets.values().forEach(PartitionData::clearEvents);
+            try {
+                if (forceSeek) {
+                    // TODO: Maybe one must really clean up streaming partitions....
+                    eventConsumer.reassign(Collections.emptyList());
+                }
+                final Map<TopicPartition, Timeline> temporaryMapping = loadPartitionsMapping(currentNakadiAssignment);
+                final List<NakadiCursor> cursors = new ArrayList<>();
+                for (final TopicPartition pk : currentKafkaAssignment) {
+                    final Timeline timeline = temporaryMapping.get(pk);
+                    final Timeline firstTimelineForET = getContext().getTimelineService()
+                            .getActiveTimelinesOrdered(timeline.getEventType()).get(0);
+                    final Optional<PartitionStatistics> stats = getContext().getTimelineService()
+                            .getTopicRepository(firstTimelineForET)
+                            .loadPartitionStatistics(firstTimelineForET, pk.getPartition());
+                    offsets.get(pk).ensureDataAvailable(stats.get().getBeforeFirst());
+                    cursors.add(offsets.get(pk).getSentOffset());
+                }
+                eventConsumer.reassign(cursors);
+            } catch (NakadiException | InvalidCursorException ex) {
+                throw new NakadiRuntimeException(ex);
+            }
         }
     }
 
+    /**
+     * TODO: This method should be deleted as part of obsolete stuff - Usage of PartitionKey should be removed in favor
+     * of using EventTypePartition.
+     *
+     * @param partitions
+     * @return
+     * @throws InternalNakadiException
+     * @throws NoSuchEventTypeException
+     */
+    private Map<TopicPartition, Timeline> loadPartitionsMapping(
+            final Collection<TopicPartition> partitions) throws InternalNakadiException, NoSuchEventTypeException {
+        final Map<TopicPartition, Timeline> result = new HashMap<>();
+        for (final String et : getContext().getSubscription().getEventTypes()) {
+            final List<Timeline> timelines = getContext().getTimelineService().getActiveTimelinesOrdered(et);
+            for (final Timeline timeline : timelines) {
+                final List<TopicPartition> matchingPartitions = partitions.stream()
+                        .filter(p -> p.getTopic().equals(timeline.getTopic()))
+                        .collect(Collectors.toList());
+
+                for (final TopicPartition pk : matchingPartitions) {
+                    result.put(pk, timeline);
+                }
+            }
+        }
+        return result;
+    }
+
+    private NakadiCursor createNakadiCursor(final TopicPartition key, final String offset) {
+        final Timeline timeline;
+        try {
+            timeline = loadPartitionsMapping(Collections.singletonList(key)).get(key);
+        } catch (InternalNakadiException | NoSuchEventTypeException e) {
+            throw new NakadiRuntimeException(e);
+        }
+        return new NakadiCursor(timeline, key.getPartition(), offset);
+    }
+
     private void addToStreaming(final Partition partition) {
-        offsets.put(
+        final NakadiCursor cursor = createNakadiCursor(partition.getKey(), getZk().getOffset(partition.getKey()));
+
+        final ZKSubscription subscription = getZk().subscribeForOffsetChanges(
                 partition.getKey(),
-                new PartitionData(
-                        getZk().subscribeForOffsetChanges(partition.getKey(), () -> addTask(()
-                                -> offsetChanged(partition.getKey()))),
-                        getZk().getOffset(partition.getKey()),
-                        LoggerFactory.getLogger("subscription." + getSessionId() + "." + partition.getKey())));
+                () -> addTask(() -> offsetChanged(partition.getKey())));
+        final PartitionData pd = new PartitionData(
+                subscription,
+                cursor,
+                LoggerFactory.getLogger("subscription." + getSessionId() + "." + partition.getKey()));
+
+        offsets.put(partition.getKey(), pd);
     }
 
     private void reassignCommitted() {
-        final List<Partition.PartitionKey> keysToRelease = releasingPartitions.keySet().stream()
+        final List<TopicPartition> keysToRelease = releasingPartitions.keySet().stream()
                 .filter(pk -> !offsets.containsKey(pk) || offsets.get(pk).isCommitted())
                 .collect(Collectors.toList());
         if (!keysToRelease.isEmpty()) {
@@ -403,12 +469,14 @@ class StreamingState extends State {
         }
     }
 
-    void offsetChanged(final Partition.PartitionKey key) {
+    void offsetChanged(final TopicPartition key) {
         if (offsets.containsKey(key)) {
             final PartitionData data = offsets.get(key);
             data.getSubscription().refresh();
-            final long offset = getZk().getOffset(key);
-            final PartitionData.CommitResult commitResult = data.onCommitOffset(offset);
+
+            final NakadiCursor cursor = createNakadiCursor(key, getZk().getOffset(key));
+
+            final PartitionData.CommitResult commitResult = data.onCommitOffset(cursor);
             if (commitResult.seekOnKafka) {
                 reconfigureKafkaConsumer(true);
             }
@@ -429,15 +497,15 @@ class StreamingState extends State {
         }
     }
 
-    private void removeFromStreaming(final Partition.PartitionKey key) {
+    private void removeFromStreaming(final TopicPartition key) {
         getLog().info("Removing partition {} from streaming", key);
         releasingPartitions.remove(key);
         final PartitionData data = offsets.remove(key);
         if (null != data) {
             try {
                 if (data.getUnconfirmed() > 0) {
-                    getLog().warn("Skipping commits: {}, commit={}, sent={}", key, data.getSentOffset()
-                            - data.getUnconfirmed(), data.getSentOffset());
+                    getLog().warn("Skipping commits: {}, commit={}, sent={}",
+                            key, data.getCommitOffset(), data.getSentOffset());
                 }
                 data.getSubscription().cancel();
             } catch (final RuntimeException ex) {

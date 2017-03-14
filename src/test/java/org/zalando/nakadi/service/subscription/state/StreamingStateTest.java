@@ -1,21 +1,28 @@
 package org.zalando.nakadi.service.subscription.state;
 
 import com.codahale.metrics.MetricRegistry;
-import org.apache.kafka.clients.consumer.Consumer;
+import java.util.Collections;
+import java.util.Date;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
+import org.zalando.nakadi.domain.Subscription;
+import org.zalando.nakadi.domain.Timeline;
+import org.zalando.nakadi.domain.TopicPartition;
+import org.zalando.nakadi.exceptions.InternalNakadiException;
+import org.zalando.nakadi.exceptions.NoSuchEventTypeException;
+import org.zalando.nakadi.repository.EventConsumer;
 import org.zalando.nakadi.service.subscription.KafkaClient;
 import org.zalando.nakadi.service.subscription.StreamParameters;
 import org.zalando.nakadi.service.subscription.StreamingContext;
 import org.zalando.nakadi.service.subscription.model.Partition;
 import org.zalando.nakadi.service.subscription.zk.ZKSubscription;
 import org.zalando.nakadi.service.subscription.zk.ZkSubscriptionClient;
-
-import java.util.Collections;
-
+import org.zalando.nakadi.service.timeline.TimelineService;
 import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class StreamingStateTest {
 
@@ -25,6 +32,8 @@ public class StreamingStateTest {
 
     private static final String SESSION_ID = "ssid";
     private MetricRegistry metricRegistry;
+    private TimelineService timelineService;
+    private Subscription subscription;
 
     @Before
     public void prepareMocks() {
@@ -34,6 +43,10 @@ public class StreamingStateTest {
 
         Mockito.when(contextMock.getSessionId()).thenReturn(SESSION_ID);
         Mockito.when(contextMock.isInState(Mockito.same(state))).thenReturn(true);
+        subscription = mock(Subscription.class);
+        Mockito.when(contextMock.getSubscription()).thenReturn(subscription);
+        timelineService = mock(TimelineService.class);
+        Mockito.when(contextMock.getTimelineService()).thenReturn(timelineService);
 
         kafkaMock = mock(KafkaClient.class);
         Mockito.when(contextMock.getKafkaClient()).thenReturn(kafkaMock);
@@ -44,6 +57,7 @@ public class StreamingStateTest {
 
         zkMock = mock(ZkSubscriptionClient.class);
         Mockito.when(contextMock.getZkClient()).thenReturn(zkMock);
+        when(zkMock.getOffset(any())).thenReturn("0");
 
         final StreamParameters spMock = StreamParameters.of(
                 1000,
@@ -83,15 +97,20 @@ public class StreamingStateTest {
     }
 
     @Test
-    public void ensureOffsetsSubscriptionsAreRefreshedAndClosed() {
+    public void ensureOffsetsSubscriptionsAreRefreshedAndClosed()
+            throws InternalNakadiException, NoSuchEventTypeException {
         final ZKSubscription offsetSubscription = mock(ZKSubscription.class);
 
-        final Partition.PartitionKey pk = new Partition.PartitionKey("t", "0");
+        final TopicPartition pk = new TopicPartition("t", "0");
         Mockito.when(zkMock.subscribeForOffsetChanges(Mockito.eq(pk), Mockito.any())).thenReturn(offsetSubscription);
 
-        final Consumer kafkaConsumer = mock(Consumer.class);
-        Mockito.when(kafkaConsumer.assignment()).thenReturn(Collections.emptySet());
-        Mockito.when(kafkaMock.createKafkaConsumer()).thenReturn(kafkaConsumer);
+        final EventConsumer.ReassignableEventConsumer consumer = mock(EventConsumer.ReassignableEventConsumer.class);
+        when(consumer.getAssignment()).thenReturn(Collections.emptySet());
+        when(timelineService.createEventConsumer(any())).thenReturn(consumer);
+        when(subscription.getEventTypes()).thenReturn(Collections.singleton("t"));
+
+        final Timeline timeline = new Timeline("t", 0, null, "t", new Date());
+        when(timelineService.getActiveTimelinesOrdered(eq("t"))).thenReturn(Collections.singletonList(timeline));
 
         state.onEnter();
 

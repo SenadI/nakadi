@@ -1,5 +1,9 @@
 package org.zalando.nakadi.service.subscription;
 
+import java.io.IOException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import org.junit.Assert;
 import org.junit.Ignore;
 import org.junit.Test;
@@ -8,11 +12,6 @@ import org.zalando.nakadi.service.subscription.model.Session;
 import org.zalando.nakadi.service.subscription.state.CleanupState;
 import org.zalando.nakadi.service.subscription.state.DummyState;
 import org.zalando.nakadi.service.subscription.state.State;
-
-import java.io.IOException;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
 
 public class StreamingContextTest {
     private static StreamingContext createTestContext(final Consumer<Exception> onException) {
@@ -44,7 +43,6 @@ public class StreamingContextTest {
                 .setKafkaPollTimeout(0)
                 .setLoggingPath("stream")
                 .setConnectionReady(new AtomicBoolean(true))
-                .setEventTypesForTopics(null)
                 .setCursorTokenService(null)
                 .setObjectMapper(null)
                 .setBlacklistService(null)

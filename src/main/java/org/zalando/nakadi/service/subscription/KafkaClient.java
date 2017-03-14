@@ -8,14 +8,13 @@ import java.util.stream.Collectors;
 import org.zalando.nakadi.domain.NakadiCursor;
 import org.zalando.nakadi.domain.Subscription;
 import org.zalando.nakadi.domain.Timeline;
+import org.zalando.nakadi.domain.TopicPartition;
 import org.zalando.nakadi.exceptions.InternalNakadiException;
 import org.zalando.nakadi.exceptions.NakadiException;
 import org.zalando.nakadi.exceptions.NakadiRuntimeException;
 import org.zalando.nakadi.exceptions.NoSuchEventTypeException;
 import org.zalando.nakadi.repository.TopicRepository;
-import org.zalando.nakadi.repository.kafka.KafkaTopicRepository;
 import org.zalando.nakadi.service.CursorConverter;
-import org.zalando.nakadi.service.subscription.model.Partition;
 import org.zalando.nakadi.service.timeline.TimelineService;
 
 public class KafkaClient {
@@ -38,7 +37,7 @@ public class KafkaClient {
         // FIXME TIMELINE: for refactoring purposes, has to be removed during timeline event consumption task
     }
 
-    public Map<Partition.PartitionKey, NakadiCursor> getSubscriptionOffsets() {
+    public Map<TopicPartition, NakadiCursor> getSubscriptionOffsets() {
         try {
             final List<NakadiCursor> existingPositions = new ArrayList<>();
             switch (subscription.getReadFrom()) {
@@ -75,7 +74,7 @@ public class KafkaClient {
             }
             return existingPositions.stream().collect(
                     Collectors.toMap(
-                            cursor -> new Partition.PartitionKey(cursor.getTopic(), cursor.getPartition()),
+                            cursor -> new TopicPartition(cursor.getTopic(), cursor.getPartition()),
                             cursor -> cursor
                     ));
         } catch (final NakadiException e) {
@@ -83,8 +82,4 @@ public class KafkaClient {
         }
     }
 
-    public org.apache.kafka.clients.consumer.Consumer<String, String> createKafkaConsumer() {
-        // TODO: Refactor to use correct layering
-        return ((KafkaTopicRepository) topicRepository).createKafkaConsumer();
-    }
 }

@@ -1,23 +1,8 @@
 package org.zalando.nakadi.domain;
 
-import com.google.common.base.Preconditions;
 import java.util.Objects;
 
-public class NakadiCursor {
-    public static final int VERSION_LENGTH = 3;
-
-    public enum Version {
-        ZERO("000"),
-        ONE("001"),;
-        public final String code;
-
-        Version(final String code) {
-            Preconditions.checkArgument(
-                    code.length() == VERSION_LENGTH,
-                    "Version field length should be equal to " + VERSION_LENGTH);
-            this.code = code;
-        }
-    }
+public class NakadiCursor implements Comparable<NakadiCursor> {
 
     private final Timeline timeline;
     private final String partition;
@@ -96,5 +81,14 @@ public class NakadiCursor {
                 ", offset='" + offset + '\'' +
                 ", timeline='" + timeline + '\'' +
                 '}';
+    }
+
+    @Override
+    public int compareTo(final NakadiCursor cursor) {
+        final int orderCompareResult = Integer.compare(this.getTimeline().getOrder(), cursor.getTimeline().getOrder());
+        if (orderCompareResult != 0) {
+            return orderCompareResult;
+        }
+        return offset.compareTo(cursor.getOffset());
     }
 }

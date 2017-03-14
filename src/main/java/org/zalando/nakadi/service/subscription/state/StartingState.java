@@ -1,11 +1,12 @@
 package org.zalando.nakadi.service.subscription.state;
 
+import java.io.IOException;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.zalando.nakadi.domain.TopicPartition;
 import org.zalando.nakadi.exceptions.NoStreamingSlotsAvailable;
 import org.zalando.nakadi.service.subscription.model.Partition;
 import org.zalando.nakadi.service.subscription.model.Session;
-import java.io.IOException;
 
 public class StartingState extends State {
     @Override
@@ -24,7 +25,7 @@ public class StartingState extends State {
         // check that subscription initialized in zk.
         if (getZk().createSubscription()) {
             // if not - create subscription node etc.
-            final Map<Partition.PartitionKey, String> cursors = getKafka().getSubscriptionOffsets().entrySet()
+            final Map<TopicPartition, String> cursors = getKafka().getSubscriptionOffsets().entrySet()
                     .stream().collect(
                             Collectors.toMap(
                                     Map.Entry::getKey,
