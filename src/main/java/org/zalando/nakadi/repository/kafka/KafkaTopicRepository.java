@@ -351,6 +351,7 @@ public class KafkaTopicRepository implements TopicRepository {
             throws ServiceUnavailableException, InvalidCursorException {
 
         final Map<NakadiCursor, KafkaCursor> cursorMapping = this.convertToKafkaCursors(cursors);
+        cursorMapping.entrySet().forEach(entry -> LOG.info("Mapped to {} from {}", entry.getValue(), entry.getKey()));
         final Map<TopicPartition, Timeline> timelineMap = cursorMapping.entrySet().stream()
                 .collect(Collectors.toMap(
                         entry -> new TopicPartition(entry.getValue().getTopic(), entry.getValue().getPartition()),

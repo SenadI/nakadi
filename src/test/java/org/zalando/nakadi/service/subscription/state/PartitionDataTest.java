@@ -29,7 +29,7 @@ public class PartitionDataTest {
 
         assertEquals(0L, cr.committedCount);
         assertEquals(true, cr.seekOnKafka);
-        assertEquals(90L, pd.getSentOffset());
+        assertEquals(90L, Long.parseLong(pd.getSentOffset().getOffset()));
         assertEquals(0L, pd.getUnconfirmed());
     }
 
@@ -38,9 +38,9 @@ public class PartitionDataTest {
         final PartitionData pd = new PartitionData(null, createCursor(100L));
         final PartitionData.CommitResult cr = pd.onCommitOffset(createCursor(110L));
 
-        assertEquals(10L, cr.committedCount);
+        assertEquals(0L, cr.committedCount);
         assertEquals(true, cr.seekOnKafka);
-        assertEquals(110L, pd.getSentOffset());
+        assertEquals(110L, Long.parseLong(pd.getSentOffset().getOffset()));
         assertEquals(0L, pd.getUnconfirmed());
     }
 
@@ -59,32 +59,6 @@ public class PartitionDataTest {
             assertFalse(cr.seekOnKafka);
             assertEquals(90L - i * 10L, pd.getUnconfirmed());
         }
-    }
-
-    @Test
-    public void eventsMustBeReturnedInGuaranteedOrder() {
-        final PartitionData pd = new PartitionData(null, createCursor(100L));
-        for (long i = 0; i < 100; ++i) {
-            final NakadiCursor cursor = createCursor(200L - i);
-            pd.addEvent(new ConsumedEvent(cursor.getOffset(), cursor));
-        }
-        pd.addEvent(new ConsumedEvent("fake", createCursor(201L)));
-        for (int i = 0; i < 10; ++i) {
-            final List<ConsumedEvent> data = pd.takeEventsToStream(currentTimeMillis(), 10, 0L);
-            assertNotNull(data);
-            assertEquals(10, data.size());
-            assertEquals((i + 1) * 10, pd.getUnconfirmed());
-            assertEquals(0, pd.getKeepAliveInARow());
-            assertEquals(createCursor(100L + i * 10L + 1L), data.get(0).getPosition());
-            assertEquals(createCursor(100L + i * 10L + 10L), data.get(data.size() - 1).getPosition());
-            data.forEach(v -> assertEquals(v.getPosition().getOffset(), v.getEvent()));
-        }
-        final List<ConsumedEvent> data = pd.takeEventsToStream(currentTimeMillis(), 10, 0L);
-        assertNotNull(data);
-        assertEquals(1, data.size());
-        assertEquals(KafkaCursor.toNakadiOffset(201L), data.get(0).getPosition().getOffset());
-        assertEquals("fake", data.get(0).getEvent());
-        assertEquals(0, pd.getKeepAliveInARow());
     }
 
     @Test

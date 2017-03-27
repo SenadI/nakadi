@@ -3,7 +3,6 @@ package org.zalando.nakadi.service.subscription.zk;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.annotation.Nullable;
@@ -14,6 +13,7 @@ import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.zalando.nakadi.domain.NakadiCursor;
 import org.zalando.nakadi.domain.TopicPartition;
 import org.zalando.nakadi.exceptions.NakadiRuntimeException;
 import org.zalando.nakadi.repository.kafka.KafkaCursor;
@@ -113,7 +113,7 @@ public class CuratorZkSubscriptionClient implements ZkSubscriptionClient {
     }
 
     @Override
-    public void fillEmptySubscription(final Map<TopicPartition, String> partitionOffsets) {
+    public void fillEmptySubscription(final Collection<NakadiCursor> cursors) {
         try {
             log.info("Creating sessions root");
             if (null != curatorFramework.checkExists().forPath(getSubscriptionPath("/sessions"))) {
@@ -131,14 +131,14 @@ public class CuratorZkSubscriptionClient implements ZkSubscriptionClient {
             curatorFramework.create().withMode(CreateMode.PERSISTENT).forPath(getSubscriptionPath("/topics"));
 
             log.info("Creating partitions");
-            for (final Map.Entry<TopicPartition, String> p : partitionOffsets.entrySet()) {
-                final String partitionPath = getPartitionPath(p.getKey());
+            for (final NakadiCursor cursor : cursors) {
+                final String partitionPath = getPartitionPath(cursor.getTopicPartition());
                 curatorFramework.create().creatingParentsIfNeeded().withMode(CreateMode.PERSISTENT).forPath(
                         partitionPath,
                         serializeNode(null, null, Partition.State.UNASSIGNED));
                 curatorFramework.create().withMode(CreateMode.PERSISTENT).forPath(
                         partitionPath + "/offset",
-                        p.getValue().getBytes(UTF_8));
+                        cursor.getOffset().getBytes(UTF_8));
             }
             log.info("creating topology node");
             curatorFramework.create().withMode(CreateMode.PERSISTENT).forPath(getSubscriptionPath("/topology"),
@@ -241,7 +241,7 @@ public class CuratorZkSubscriptionClient implements ZkSubscriptionClient {
 
     @Override
     public ZKSubscription subscribeForOffsetChanges(final TopicPartition key, final Runnable commitListener) {
-        log.info("subscribeForOffsetChanges");
+        log.info("subscribeForOffsetChanges: {}", key);
         return ChangeListener.forData(curatorFramework, getPartitionPath(key) + "/offset", commitListener);
     }
 

@@ -3,6 +3,7 @@ package org.zalando.nakadi.repository;
 import com.google.common.base.Preconditions;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -59,7 +60,6 @@ public class MultiTimelineEventConsumer implements EventConsumer.ReassignableEve
     private final TimelineSync timelineSync;
     private final AtomicBoolean timelinesChanged = new AtomicBoolean(false);
     private static final Logger LOG = LoggerFactory.getLogger(MultiTimelineEventConsumer.class);
-    private static final int MAX_POLL_PER_CONSUMER = 10;
 
     public MultiTimelineEventConsumer(
             final String clientId,
@@ -141,8 +141,9 @@ public class MultiTimelineEventConsumer implements EventConsumer.ReassignableEve
         Preconditions.checkNotNull(electedTimeline);
         final TopicRepository result = timelineService.getTopicRepository(electedTimeline);
         if (electedTimeline.getOrder() > cursor.getTimeline().getOrder()) {
-            // It seems that cursor jumped to different timeline. One need to fetch very first cursor in timeline.
-            cursorReplacer.accept(getBeforeFirstCursor(result, electedTimeline, cursor.getPartition()));
+            final NakadiCursor replacement = getBeforeFirstCursor(result, electedTimeline, cursor.getPartition());
+            LOG.info("Replacing cursor because of jumping between timelines from {} to {}", cursor, replacement);
+            cursorReplacer.accept(replacement);
         }
         lastTimelinePosition.accept(electedTimeline.calculateNakadiLatestPosition(cursor.getPartition()));
         return result;
@@ -198,6 +199,8 @@ public class MultiTimelineEventConsumer implements EventConsumer.ReassignableEve
         for (final Map.Entry<TopicRepository, List<NakadiCursor>> entry : newAssignment.entrySet()) {
             if (!eventConsumers.containsKey(entry.getKey())) {
                 final TopicRepository repo = entry.getKey();
+                LOG.info("Creating underlying consumer for client id {} and cursors {}",
+                        clientId, Arrays.deepToString(entry.getValue().toArray()));
                 final EventConsumer consumer = repo.createEventConsumer(clientId, entry.getValue());
                 eventConsumers.put(repo, consumer);
             }

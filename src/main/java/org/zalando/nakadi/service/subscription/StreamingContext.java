@@ -33,7 +33,6 @@ public class StreamingContext implements SubscriptionStreamer {
     private final StreamParameters parameters;
     private final Session session;
     private final ZkSubscriptionClient zkClient;
-    private final KafkaClient kafkaClient;
     private final SubscriptionOutput out;
     private final long kafkaPollTimeout;
     private final AtomicBoolean connectionReady;
@@ -60,7 +59,6 @@ public class StreamingContext implements SubscriptionStreamer {
         this.rebalancer = builder.rebalancer;
         this.timer = builder.timer;
         this.zkClient = builder.zkClient;
-        this.kafkaClient = builder.kafkaClient;
         this.kafkaPollTimeout = builder.kafkaPollTimeout;
         this.loggingPath = builder.loggingPath + ".stream";
         this.log = LoggerFactory.getLogger(builder.loggingPath);
@@ -88,10 +86,6 @@ public class StreamingContext implements SubscriptionStreamer {
 
     public String getSessionId() {
         return session.getId();
-    }
-
-    public KafkaClient getKafkaClient() {
-        return kafkaClient;
     }
 
     public SubscriptionOutput getOut() {
@@ -228,7 +222,6 @@ public class StreamingContext implements SubscriptionStreamer {
         private Session session;
         private ScheduledExecutorService timer;
         private ZkSubscriptionClient zkClient;
-        private KafkaClient kafkaClient;
         private BiFunction<Session[], Partition[], Partition[]> rebalancer;
         private long kafkaPollTimeout;
         private String loggingPath;
@@ -263,11 +256,6 @@ public class StreamingContext implements SubscriptionStreamer {
 
         public Builder setZkClient(final ZkSubscriptionClient zkClient) {
             this.zkClient = zkClient;
-            return this;
-        }
-
-        public Builder setKafkaClient(final KafkaClient kafkaClient) {
-            this.kafkaClient = kafkaClient;
             return this;
         }
 

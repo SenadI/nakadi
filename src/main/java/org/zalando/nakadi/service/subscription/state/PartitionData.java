@@ -1,5 +1,6 @@
 package org.zalando.nakadi.service.subscription.state;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
@@ -24,6 +25,7 @@ class PartitionData {
     private long lastSendMillis;
     private int keepAliveInARow;
 
+    @VisibleForTesting
     PartitionData(final ZKSubscription subscription, final NakadiCursor commitOffset) {
         this(subscription, commitOffset, LoggerFactory.getLogger(PartitionData.class));
     }
@@ -120,16 +122,19 @@ class PartitionData {
         }
         final long committed;
         if (offset.compareTo(commitOffset) >= 0) {
-            final Set<NakadiCursor> committedCursors = allCursorsOrdered.headSet(commitOffset, true);
+            final Set<NakadiCursor> committedCursors = allCursorsOrdered.headSet(offset, true);
             committed = committedCursors.size();
             commitOffset = offset;
             // Operation is cascaded to allCursorsOrdered set.
             committedCursors.clear();
         } else {
             log.error("Commits in past are evil!: Committing in {} while current commit is {}", offset, commitOffset);
+            // Commit in past occurred. One should move storage pointer to sentOffset.
             seekKafka = true;
             commitOffset = offset;
             sentOffset = commitOffset;
+            allCursorsOrdered.clear();
+            nakadiEvents.clear();
             committed = 0;
         }
         while (!nakadiEvents.isEmpty() && nakadiEvents.get(0).getPosition().compareTo(commitOffset) <= 0) {

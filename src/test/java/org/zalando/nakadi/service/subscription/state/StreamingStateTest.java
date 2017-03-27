@@ -3,16 +3,20 @@ package org.zalando.nakadi.service.subscription.state;
 import com.codahale.metrics.MetricRegistry;
 import java.util.Collections;
 import java.util.Date;
+import java.util.Optional;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
+import org.zalando.nakadi.domain.NakadiCursor;
+import org.zalando.nakadi.domain.PartitionStatistics;
 import org.zalando.nakadi.domain.Subscription;
 import org.zalando.nakadi.domain.Timeline;
 import org.zalando.nakadi.domain.TopicPartition;
 import org.zalando.nakadi.exceptions.InternalNakadiException;
 import org.zalando.nakadi.exceptions.NoSuchEventTypeException;
+import org.zalando.nakadi.exceptions.ServiceUnavailableException;
 import org.zalando.nakadi.repository.EventConsumer;
-import org.zalando.nakadi.service.subscription.KafkaClient;
+import org.zalando.nakadi.repository.TopicRepository;
 import org.zalando.nakadi.service.subscription.StreamParameters;
 import org.zalando.nakadi.service.subscription.StreamingContext;
 import org.zalando.nakadi.service.subscription.model.Partition;
@@ -27,7 +31,6 @@ import static org.mockito.Mockito.when;
 public class StreamingStateTest {
 
     private StreamingState state;
-    private KafkaClient kafkaMock;
     private ZkSubscriptionClient zkMock;
 
     private static final String SESSION_ID = "ssid";
@@ -47,9 +50,6 @@ public class StreamingStateTest {
         Mockito.when(contextMock.getSubscription()).thenReturn(subscription);
         timelineService = mock(TimelineService.class);
         Mockito.when(contextMock.getTimelineService()).thenReturn(timelineService);
-
-        kafkaMock = mock(KafkaClient.class);
-        Mockito.when(contextMock.getKafkaClient()).thenReturn(kafkaMock);
 
         metricRegistry = mock(MetricRegistry.class);
         Mockito.when(metricRegistry.register(any(), any())).thenReturn(null);
@@ -98,7 +98,7 @@ public class StreamingStateTest {
 
     @Test
     public void ensureOffsetsSubscriptionsAreRefreshedAndClosed()
-            throws InternalNakadiException, NoSuchEventTypeException {
+            throws InternalNakadiException, NoSuchEventTypeException, ServiceUnavailableException {
         final ZKSubscription offsetSubscription = mock(ZKSubscription.class);
 
         final TopicPartition pk = new TopicPartition("t", "0");
@@ -111,6 +111,11 @@ public class StreamingStateTest {
 
         final Timeline timeline = new Timeline("t", 0, null, "t", new Date());
         when(timelineService.getActiveTimelinesOrdered(eq("t"))).thenReturn(Collections.singletonList(timeline));
+        final TopicRepository topicRepository = mock(TopicRepository.class);
+        when(timelineService.getTopicRepository(eq(timeline))).thenReturn(topicRepository);
+        final PartitionStatistics stats = mock(PartitionStatistics.class);
+        when(stats.getBeforeFirst()).thenReturn(new NakadiCursor(timeline, "0", "0"));
+        when(topicRepository.loadPartitionStatistics(eq(timeline), eq("0"))).thenReturn(Optional.of(stats));
 
         state.onEnter();
 

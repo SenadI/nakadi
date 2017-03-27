@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.base.Preconditions;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -28,6 +29,7 @@ import org.zalando.nakadi.exceptions.InvalidCursorException;
 import org.zalando.nakadi.exceptions.NakadiException;
 import org.zalando.nakadi.exceptions.NakadiRuntimeException;
 import org.zalando.nakadi.exceptions.NoSuchEventTypeException;
+import org.zalando.nakadi.exceptions.ServiceUnavailableException;
 import org.zalando.nakadi.metrics.MetricUtils;
 import org.zalando.nakadi.repository.EventConsumer;
 import org.zalando.nakadi.service.EventStream;
@@ -141,20 +143,9 @@ class StreamingState extends State {
             scheduleTask(this::pollDataFromKafka, getKafkaPollTimeout(), TimeUnit.MILLISECONDS);
             return;
         }
-        boolean added = false;
-        Optional<ConsumedEvent> event;
-        while ((event = eventConsumer.readEvent(false)).isPresent()) {
-            added = true;
-            rememberEvent(event.get());
-        }
-        if ((event = eventConsumer.readEvent(true)).isPresent()) {
-            added = true;
-            rememberEvent(event.get());
-            while ((event = eventConsumer.readEvent(false)).isPresent()) {
-                rememberEvent(event.get());
-            }
-        }
-        if (added) {
+        final List<ConsumedEvent> events = eventConsumer.readEvents();
+        events.forEach(this::rememberEvent);
+        if (!events.isEmpty()) {
             addTask(this::streamToOutput);
         }
 
@@ -242,7 +233,7 @@ class StreamingState extends State {
                 .append(cursorSerialized);
         if (!events.isEmpty()) {
             builder.append(",\"events\":[");
-            events.forEach(event -> builder.append(event).append(","));
+            events.forEach(event -> builder.append(event.getEvent()).append(","));
             builder.deleteCharAt(builder.length() - 1).append("]");
         }
         metadata.ifPresent(s -> builder.append(",\"info\":{\"debug\":\"").append(s).append("\"}"));
@@ -373,29 +364,36 @@ class StreamingState extends State {
             throw new IllegalStateException(
                     "kafkaConsumer should not be null when calling reconfigureKafkaConsumer method");
         }
+        final Set<TopicPartition> newAssignment = offsets.keySet().stream()
+                .filter(o -> !this.releasingPartitions.containsKey(o))
+                .collect(Collectors.toSet());
+        if (forceSeek) {
+            // Force seek means that user committed somewhere not within [commitOffset, sentOffset], and one
+            // should fully reconsume all the information from underlying storage. In order to do that, we are
+            // removing all the current assignments for real consumer.
+            try {
+                eventConsumer.reassign(Collections.emptyList());
+            } catch (final NakadiException | InvalidCursorException ex) {
+                throw new NakadiRuntimeException(ex);
+            }
+        }
         final Set<TopicPartition> currentKafkaAssignment = eventConsumer.getAssignment().stream()
                 .map(tp -> new TopicPartition(tp.getTopic(), String.valueOf(tp.getPartition())))
                 .collect(Collectors.toSet());
 
-        final Set<TopicPartition> currentNakadiAssignment = offsets.keySet().stream()
-                .filter(o -> !this.releasingPartitions.containsKey(o))
-                .collect(Collectors.toSet());
-        if (!currentKafkaAssignment.equals(currentNakadiAssignment) || forceSeek) {
+        getLog().info("Changing kafka assignment from {} to {}",
+                Arrays.deepToString(currentKafkaAssignment.toArray()),
+                Arrays.deepToString(newAssignment.toArray()));
+
+        if (!currentKafkaAssignment.equals(newAssignment)) {
             try {
-                if (forceSeek) {
-                    // TODO: Maybe one must really clean up streaming partitions....
-                    eventConsumer.reassign(Collections.emptyList());
-                }
-                final Map<TopicPartition, Timeline> temporaryMapping = loadPartitionsMapping(currentNakadiAssignment);
+                final Map<TopicPartition, Timeline> temporaryMapping = loadPartitionsMapping(newAssignment);
                 final List<NakadiCursor> cursors = new ArrayList<>();
-                for (final TopicPartition pk : currentKafkaAssignment) {
-                    final Timeline timeline = temporaryMapping.get(pk);
-                    final Timeline firstTimelineForET = getContext().getTimelineService()
-                            .getActiveTimelinesOrdered(timeline.getEventType()).get(0);
-                    final Optional<PartitionStatistics> stats = getContext().getTimelineService()
-                            .getTopicRepository(firstTimelineForET)
-                            .loadPartitionStatistics(firstTimelineForET, pk.getPartition());
-                    offsets.get(pk).ensureDataAvailable(stats.get().getBeforeFirst());
+                for (final TopicPartition pk : newAssignment) {
+                    // Next 2 lines checks that current cursor is still available in storage
+                    final NakadiCursor beforeFirstAvailable = getBeforeFirstCursor(temporaryMapping, pk);
+                    offsets.get(pk).ensureDataAvailable(beforeFirstAvailable);
+                    // Now it is safe to reposition.
                     cursors.add(offsets.get(pk).getSentOffset());
                 }
                 eventConsumer.reassign(cursors);
@@ -405,15 +403,20 @@ class StreamingState extends State {
         }
     }
 
-    /**
-     * TODO: This method should be deleted as part of obsolete stuff - Usage of PartitionKey should be removed in favor
-     * of using EventTypePartition.
-     *
-     * @param partitions
-     * @return
-     * @throws InternalNakadiException
-     * @throws NoSuchEventTypeException
-     */
+    private NakadiCursor getBeforeFirstCursor(final Map<TopicPartition, Timeline> temporaryMapping,
+                                              final TopicPartition pk)
+            throws InternalNakadiException, NoSuchEventTypeException, ServiceUnavailableException {
+        final Timeline timeline = temporaryMapping.get(pk);
+        final Timeline firstTimelineForET = getContext().getTimelineService()
+                .getActiveTimelinesOrdered(timeline.getEventType()).get(0);
+
+        final Optional<PartitionStatistics> stats = getContext().getTimelineService()
+                .getTopicRepository(firstTimelineForET)
+                .loadPartitionStatistics(firstTimelineForET, pk.getPartition());
+
+        return stats.get().getBeforeFirst();
+    }
+
     private Map<TopicPartition, Timeline> loadPartitionsMapping(
             final Collection<TopicPartition> partitions) throws InternalNakadiException, NoSuchEventTypeException {
         final Map<TopicPartition, Timeline> result = new HashMap<>();
@@ -444,7 +447,7 @@ class StreamingState extends State {
 
     private void addToStreaming(final Partition partition) {
         final NakadiCursor cursor = createNakadiCursor(partition.getKey(), getZk().getOffset(partition.getKey()));
-
+        getLog().info("Adding to streaming {} with start position {}", partition.getKey(), cursor);
         final ZKSubscription subscription = getZk().subscribeForOffsetChanges(
                 partition.getKey(),
                 () -> addTask(() -> offsetChanged(partition.getKey())));

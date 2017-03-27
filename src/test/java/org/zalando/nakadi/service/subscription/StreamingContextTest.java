@@ -38,7 +38,6 @@ public class StreamingContextTest {
                 .setSession(Session.generate(1))
                 .setTimer(null)
                 .setZkClient(null)
-                .setKafkaClient(null)
                 .setRebalancer(null)
                 .setKafkaPollTimeout(0)
                 .setLoggingPath("stream")

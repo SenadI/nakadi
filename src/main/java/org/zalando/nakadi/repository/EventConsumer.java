@@ -1,6 +1,7 @@
 package org.zalando.nakadi.repository;
 
 import java.io.Closeable;
+import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import org.zalando.nakadi.domain.ConsumedEvent;
